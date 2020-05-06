@@ -314,11 +314,14 @@ public class StandaloneIngressHandler extends AbstractHandler {
       //
             
       String datalogHeader = request.getHeader(Constants.getHeader(Configuration.HTTP_HEADER_DATALOG));
-      
+            
       DatalogRequest dr = null;
       
       boolean forwarded = false;
       
+      boolean nocache = false;
+      boolean nopersist = false;
+         
       if (null != datalogHeader) {
         byte[] bytes = OrderPreservingBase64.decode(datalogHeader.getBytes(StandardCharsets.US_ASCII));
         
@@ -351,8 +354,38 @@ public class StandaloneIngressHandler extends AbstractHandler {
         forwarded = true;
         
         deltaAttributes = dr.isDeltaAttributes();
+        
+        if (dr.getAttributesSize() > 0) {
+          if (null != dr.getAttributes().get(StandaloneAcceleratedStoreClient.ATTR_NOCACHE)) {
+            nocache = true;
+          } else {
+            nocache = false;
+          }
+          if (null != dr.getAttributes().get(StandaloneAcceleratedStoreClient.ATTR_NOPERSIST)) {
+            nopersist = true;
+          } else {
+            nopersist = false;
+          }
+        }
+      } else {        
+        if (null != request.getHeader(StandaloneAcceleratedStoreClient.ACCELERATOR_HEADER)) {
+          nocache = request.getHeader(StandaloneAcceleratedStoreClient.ACCELERATOR_HEADER).contains(StandaloneAcceleratedStoreClient.NOCACHE);
+          nopersist = request.getHeader(StandaloneAcceleratedStoreClient.ACCELERATOR_HEADER).contains(StandaloneAcceleratedStoreClient.NOPERSIST);                
+        }
       }
 
+      if (nocache) {
+        StandaloneAcceleratedStoreClient.nocache();
+      } else {
+        StandaloneAcceleratedStoreClient.cache();          
+      }
+
+      if (nopersist) {
+        StandaloneAcceleratedStoreClient.nopersist();
+      } else {
+        StandaloneAcceleratedStoreClient.persist();        
+      }
+      
       //
       // TODO(hbs): Extract producer/owner from token
       //
@@ -396,6 +429,8 @@ public class StandaloneIngressHandler extends AbstractHandler {
       
       boolean hasDatapoints = false;
 
+      boolean expose = false;
+          
       try {      
         if (null == producer || null == owner) {
           response.sendError(HttpServletResponse.SC_FORBIDDEN, "Invalid token.");
@@ -477,6 +512,8 @@ public class StandaloneIngressHandler extends AbstractHandler {
         Boolean ignoor = null;
         
         if (writeToken.getAttributesSize() > 0) {
+          
+          expose = writeToken.getAttributes().containsKey(Constants.TOKEN_ATTR_EXPOSE);
           
           if (writeToken.getAttributes().containsKey(Constants.TOKEN_ATTR_IGNOOR)) {
             String v = writeToken.getAttributes().get(Constants.TOKEN_ATTR_IGNOOR).toLowerCase();
@@ -618,6 +655,13 @@ public class StandaloneIngressHandler extends AbstractHandler {
               now = TimeSource.getTime();
             }
             dr.setNow(Long.toString(now));
+            
+            if (nocache) {
+              dr.putToAttributes(StandaloneAcceleratedStoreClient.ATTR_NOCACHE, "");
+            }
+            if (nopersist) {
+              dr.putToAttributes(StandaloneAcceleratedStoreClient.ATTR_NOPERSIST, "");
+            }
           }
           
           if (null != dr && (!forwarded || (forwarded && this.logforwarded))) {
@@ -752,8 +796,8 @@ public class StandaloneIngressHandler extends AbstractHandler {
               lastencoder.setClassId(GTSHelper.classId(ckl0, ckl1, lastencoder.getName()));
               lastencoder.setLabelsId(GTSHelper.labelsId(lkl0, lkl1, lastencoder.getMetadata().getLabels()));
 
-              ThrottlingManager.checkMADS(lastencoder.getMetadata(), producer, owner, application, lastencoder.getClassId(), lastencoder.getLabelsId());
-              ThrottlingManager.checkDDP(lastencoder.getMetadata(), producer, owner, application, (int) lastencoder.getCount());
+              ThrottlingManager.checkMADS(lastencoder.getMetadata(), producer, owner, application, lastencoder.getClassId(), lastencoder.getLabelsId(), expose);
+              ThrottlingManager.checkDDP(lastencoder.getMetadata(), producer, owner, application, (int) lastencoder.getCount(), expose);
             }
             
             //
@@ -831,8 +875,8 @@ public class StandaloneIngressHandler extends AbstractHandler {
           lastencoder.setClassId(GTSHelper.classId(ckl0, ckl1, lastencoder.getName()));
           lastencoder.setLabelsId(GTSHelper.labelsId(lkl0, lkl1, lastencoder.getMetadata().getLabels()));
                   
-          ThrottlingManager.checkMADS(lastencoder.getMetadata(), producer, owner, application, lastencoder.getClassId(), lastencoder.getLabelsId());
-          ThrottlingManager.checkDDP(lastencoder.getMetadata(), producer, owner, application, (int) lastencoder.getCount());
+          ThrottlingManager.checkMADS(lastencoder.getMetadata(), producer, owner, application, lastencoder.getClassId(), lastencoder.getLabelsId(), expose);
+          ThrottlingManager.checkDDP(lastencoder.getMetadata(), producer, owner, application, (int) lastencoder.getCount(), expose);
           this.storeClient.store(lastencoder);
           
           if (parseAttributes && lastHadAttributes) {
@@ -1068,7 +1112,7 @@ public class StandaloneIngressHandler extends AbstractHandler {
           dr.setDeltaAttributes(deltaAttributes);
         }
         
-        if (null != dr && (!forwarded || (forwarded && this.logforwarded))) {        
+        if (!forwarded || this.logforwarded) {
           //
           // Serialize the request
           //

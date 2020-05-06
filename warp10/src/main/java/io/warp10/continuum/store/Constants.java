@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2020  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -260,11 +260,6 @@ public class Constants {
    * Split fetch endpoint
    */
   public static final String API_ENDPOINT_SFETCH = "/api/v0/sfetch";
-  
-  /**
-   * Archive Fetch endpoint for the API
-   */
-  public static final String API_ENDPOINT_AFETCH = "/api/v0/afetch";
 
   /**
    * Delete endpoint for the API
@@ -376,6 +371,7 @@ public class Constants {
   public static final String HTTP_PARAM_SAMPLE = "sample";
   public static final String HTTP_PARAM_PREBOUNDARY = "boundary.pre";
   public static final String HTTP_PARAM_POSTBOUNDARY = "boundary.post";
+  public static final String HTTP_PARAM_METAONLY = "metaonly";
 
   public static final String DEFAULT_PACKED_CLASS_SUFFIX = ":packed";
   public static final int DEFAULT_PACKED_MAXSIZE = 65536;
@@ -388,6 +384,9 @@ public class Constants {
   public static final String KEY_MODULUS = "modulus";
   public static final String KEY_ALGORITHM = "algorithm";
   public static final String KEY_EXPONENT = "exponent";
+  public static final String KEY_CURVE = "curve";
+  public static final String KEY_Q = "Q";
+  public static final String KEY_D = "d";
   
   private static final int DEFAULT_MAX_ENCODER_SIZE = 100000;
   
@@ -425,6 +424,11 @@ public class Constants {
    */
   public static final String TOKEN_ATTR_DPTS = ".dpts";
   
+  /**
+   * Attribute to specify that owner and producer should be exposed instead of hidden
+   */
+  public static final String TOKEN_ATTR_EXPOSE = ".expose";
+  
   //
   // KafkaMessage Store attributes
   //
@@ -446,8 +450,30 @@ public class Constants {
    */
   public static  final int MAX_HTTP_HEADER_LENGTH = 1024;
 
+  public static final boolean EXPOSE_OWNER_PRODUCER;
+  
+  /**
+   * Does Directory support missing label selectors (using an empty STRING as exact match)
+   */
+  public static final boolean ABSENT_LABEL_SUPPORT;
+  
+  /**
+   * Does the /delete endpoint allow the use of the 'nodata' parameter to only remove metadata
+   */
+  public static final boolean DELETE_METAONLY_SUPPORT;
+  
+  public static final boolean DELETE_ACTIVITY_SUPPORT;
+  
   static {
     String tu = WarpConfig.getProperty(Configuration.WARP_TIME_UNITS);
+  
+    EXPOSE_OWNER_PRODUCER = "true".equals(WarpConfig.getProperty(Configuration.WARP10_EXPOSE_OWNER_PRODUCER));
+    
+    ABSENT_LABEL_SUPPORT = "true".equals(WarpConfig.getProperty(Configuration.WARP10_ABSENT_LABEL_SUPPORT));
+    
+    DELETE_METAONLY_SUPPORT = "true".equals(WarpConfig.getProperty(Configuration.INGRESS_DELETE_METAONLY_SUPPORT));
+    
+    DELETE_ACTIVITY_SUPPORT = "true".equals(WarpConfig.getProperty(Configuration.INGRESS_DELETE_ACTIVITY_SUPPORT));
     
     if (null == tu) {
       throw new RuntimeException("Missing time units.");

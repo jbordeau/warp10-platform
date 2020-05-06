@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2020  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -16,7 +16,31 @@
 
 package io.warp10.script;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.StringReader;
+import java.io.UnsupportedEncodingException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EmptyStackException;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.util.Progressable;
+
 import io.warp10.WarpConfig;
+import io.warp10.WarpURLDecoder;
 import io.warp10.WarpURLEncoder;
 import io.warp10.continuum.Configuration;
 import io.warp10.continuum.gts.UnsafeString;
@@ -29,36 +53,19 @@ import io.warp10.warp.sdk.WarpScriptJavaFunction;
 import io.warp10.warp.sdk.WarpScriptJavaFunctionException;
 import io.warp10.warp.sdk.WarpScriptRawJavaFunction;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.StringReader;
-import java.io.UnsupportedEncodingException;
-import java.math.BigInteger;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.EmptyStackException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-
-import org.apache.commons.lang.StringUtils;
-import org.apache.hadoop.util.Progressable;
-
 public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
 
   private static final Properties DEFAULT_PROPERTIES;
-  
+
   static {
     DEFAULT_PROPERTIES = WarpConfig.getProperties();
   }
+
+  private Signal signal = null;
+  private boolean signaled = false;
   
+  private final boolean allowLooseBlockComments;
+
   private AtomicLong[] counters;
 
   private final Object[] registers;
@@ -148,6 +155,8 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
   
   private final boolean unshadow;
   
+  private final long creationTime = System.currentTimeMillis();
+  
   public static class StackContext extends WarpScriptStack.StackContext {
     public Map<String, Object> symbolTable;
     public Map<String, WarpScriptStackFunction> defined;
@@ -197,6 +206,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_BUCKETS, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_BUCKETS, Integer.toString(WarpScriptStack.DEFAULT_MAX_BUCKETS))));
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_PIXELS, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_PIXELS, Long.toString(WarpScriptStack.DEFAULT_MAX_PIXELS))));
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_GEOCELLS, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_GEOCELLS, Integer.toString(WarpScriptStack.DEFAULT_MAX_GEOCELLS))));
+      setAttribute(WarpScriptStack.ATTRIBUTE_JSON_MAXSIZE, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_JSON, Long.toString(WarpScriptStack.DEFAULT_MAX_JSON))));
 
       //
       // Set hard limits
@@ -207,11 +217,12 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_DEPTH_HARD, Integer.parseInt(properties.getProperty(Configuration.WARPSCRIPT_MAX_DEPTH_HARD, Integer.toString(WarpScriptStack.DEFAULT_MAX_DEPTH))));
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_OPS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_OPS_HARD, Long.toString(WarpScriptStack.DEFAULT_MAX_OPS))));
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_SYMBOLS_HARD, Integer.parseInt(properties.getProperty(Configuration.WARPSCRIPT_MAX_SYMBOLS_HARD, Integer.toString(WarpScriptStack.DEFAULT_MAX_SYMBOLS))));
-      setAttribute(WarpScriptStack.ATTRIBUTE_MAX_BUCKETS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_BUCKETS_HARD, Integer.toString(WarpScriptStack.DEFAULT_MAX_BUCKETS))));
+      setAttribute(WarpScriptStack.ATTRIBUTE_MAX_BUCKETS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_BUCKETS_HARD, Long.toString(WarpScriptStack.DEFAULT_MAX_BUCKETS))));
       setAttribute(WarpScriptStack.ATTRIBUTE_MAX_PIXELS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_PIXELS_HARD, Long.toString(WarpScriptStack.DEFAULT_MAX_PIXELS))));
       setAttribute(WarpScriptStack.ATTRIBUTE_FETCH_LIMIT_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_FETCH_HARD, Long.toString(WarpScriptStack.DEFAULT_FETCH_LIMIT))));
       setAttribute(WarpScriptStack.ATTRIBUTE_GTS_LIMIT_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_GTS_HARD, Long.toString(WarpScriptStack.DEFAULT_GTS_LIMIT))));
-      setAttribute(WarpScriptStack.ATTRIBUTE_MAX_GEOCELLS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_GEOCELLS_HARD, Integer.toString(WarpScriptStack.DEFAULT_MAX_GEOCELLS))));
+      setAttribute(WarpScriptStack.ATTRIBUTE_MAX_GEOCELLS_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_GEOCELLS_HARD, Long.toString(WarpScriptStack.DEFAULT_MAX_GEOCELLS))));
+      setAttribute(WarpScriptStack.ATTRIBUTE_JSON_MAXSIZE_HARD, Long.parseLong(properties.getProperty(Configuration.WARPSCRIPT_MAX_JSON_HARD, Long.toString(WarpScriptStack.DEFAULT_MAX_JSON))));
 
       //
       // Set top level section name
@@ -232,9 +243,14 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
     
     this.properties = properties;
 
-    int nregs = Integer.parseInt(null == this.properties ? String.valueOf(WarpScriptStack.DEFAULT_REGISTERS) : this.properties.getProperty(Configuration.CONFIG_WARPSCRIPT_REGISTERS, String.valueOf(WarpScriptStack.DEFAULT_REGISTERS)));
-
-    this.registers = new Object[nregs];
+    int nregs = Integer.parseInt(this.properties.getProperty(Configuration.CONFIG_WARPSCRIPT_REGISTERS, String.valueOf(WarpScriptStack.DEFAULT_REGISTERS)));
+    allowLooseBlockComments = "true".equals(properties.getProperty(Configuration.WARPSCRIPT_ALLOW_LOOSE_BLOCK_COMMENTS, "false"));
+    this.registers = new Object[nregs];    
+  }
+  
+  @Override
+  protected void finalize() throws Throwable {
+    WarpScriptStackRegistry.unregister(this);
   }
   
   public void maxLimits() {
@@ -250,6 +266,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
     setAttribute(WarpScriptStack.ATTRIBUTE_MAX_PIXELS, Long.MAX_VALUE - 1);
     // Set max of geocells to the largest INTEGER - 1, not Long.MAX_VALUE as it is used as an int
     setAttribute(WarpScriptStack.ATTRIBUTE_MAX_GEOCELLS, Integer.MAX_VALUE - 1);
+    setAttribute(WarpScriptStack.ATTRIBUTE_JSON_MAXSIZE, Long.MAX_VALUE);
   }
   
   @Override
@@ -340,23 +357,22 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
   @Override
   public Object[] popn() throws EmptyStackException, IndexOutOfBoundsException {
     int n = getn();
-    
+
+    return popn(n);
+  }
+
+  @Override
+  public Object[] popn(int n) throws EmptyStackException, IndexOutOfBoundsException {
     if (size < n || n < 0) {
       throw new IndexOutOfBoundsException("Index out of bound.");
     }
-    
+
     Object[] objects = new Object[n];
 
-    //
-    // Remove objects from the end of the stack so the call to remove is blazing
-    // fast.
-    //
-    
-    for (int i = n - 1; i >= 0; i--) {
-      objects[i] = elements[size - 1];
-      size--;
-    }
-    
+    System.arraycopy(elements, size - n, objects, 0, n);
+
+    size -= n;
+
     return objects;
   }
   
@@ -500,7 +516,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       // Rethrow WarpScriptStopExceptions as is
       throw wsse;
     } catch (Exception e) {
-      throw new WarpScriptException("Line #" + i + ": " + e.getMessage());
+      throw new WarpScriptException("Line #" + i, e);
     }
    
     //String[] lines = UnsafeString.split(script, '\n');
@@ -557,6 +573,8 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       //
 
       for (int st = 0; st < statements.length; st++) {
+        handleSignal();
+
         String stmt = statements[st];
 
         try {
@@ -616,15 +634,28 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
             }
             multiline.append(stmt);
             continue;
-          } else if (WarpScriptStack.COMMENT_END.equals(stmt)) {
+          } else if (!allowLooseBlockComments && WarpScriptStack.COMMENT_END.equals(stmt)) {
+            // Legacy comments block: Comments block must start with <* and end with *> .
             if (!inComment.get()) {
               throw new WarpScriptException("Not inside a comment.");
             }
             inComment.set(false);
             continue;
+          } else if (allowLooseBlockComments && stmt.startsWith(WarpScriptStack.COMMENT_START) && stmt.endsWith(WarpScriptStack.COMMENT_END)) {
+            // Single statement case : /*****foo*****/
+            continue;
+          } else if (allowLooseBlockComments && inComment.get() && stmt.endsWith(WarpScriptStack.COMMENT_END)) {
+            // End of comment, statement may contain characters before : +-+***/
+            inComment.set(false);
+            continue;
           } else if (inComment.get()) {
             continue;
-          } else if (WarpScriptStack.COMMENT_START.equals(stmt)) {
+          } else if (!allowLooseBlockComments && WarpScriptStack.COMMENT_START.equals(stmt)) {
+            // Start of comment, statement may contain characters after : /**----
+            inComment.set(true);
+            continue;
+          } else if (allowLooseBlockComments && stmt.startsWith(WarpScriptStack.COMMENT_START)) {
+            // Legacy comments block: Comments block must start with /* and end with */ .
             inComment.set(true);
             continue;
           } else if (WarpScriptStack.MULTILINE_START.equals(stmt)) {
@@ -688,11 +719,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
             try {
               String str = stmt.substring(1, stmt.length() - 1);
 
-              if (-1 != UnsafeString.indexOf(str, '%')) {
-                // replace occurrences of '+' with '%2B'
-                str = str.replaceAll("\\+", "%2B");
-                str = URLDecoder.decode(str, StandardCharsets.UTF_8.name());
-              }
+              str = WarpURLDecoder.decode(str, StandardCharsets.UTF_8);
 
               if (macros.isEmpty()) {
                 push(str);
@@ -815,7 +842,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
             // Check WarpScript functions
             //
 
-            func = null != func ? func : defined.get(stmt);
+            func = defined.get(stmt);
 
             if (null != func && Boolean.FALSE.equals(getAttribute(WarpScriptStack.ATTRIBUTE_ALLOW_REDEFINED))) {
               throw new WarpScriptException("Disallowed redefined function '" + stmt + "'.");
@@ -925,7 +952,8 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       progress();
 
       for (i = 0; i < n; i++) {        
-
+        handleSignal();
+        
         Object stmt = stmts.get(i);
         
         incOps();
@@ -1206,6 +1234,7 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
   
   @Override
   public Object setAttribute(String key, Object value) {
+    
     if (null == value) {
       return this.attributes.remove(key);
     }
@@ -1238,6 +1267,10 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
     } else if (WarpScriptStack.ATTRIBUTE_HADOOP_PROGRESSABLE.equals(key)) {
       // value is not null because it was checked on first line
       this.progressable = (Progressable) value;
+    } else if (WarpScriptStack.ATTRIBUTE_NAME.equals(key)) {
+      // Register the stack if its name is set, this will avoid
+      // having lots of anonymous stacks being registered
+      WarpScriptStackRegistry.register(this);
     }
 
     return this.attributes.put(key, value);
@@ -1254,6 +1287,8 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
       return this.sectionName;
     } else if (WarpScriptStack.ATTRIBUTE_MACRO_NAME.equals(key)) {
       return this.macroName;
+    } else if (WarpScriptStack.ATTRIBUTE_CREATION_TIME.equals(key)) {
+      return this.creationTime;
     } else {
       return this.attributes.get(key);
     }
@@ -1573,5 +1608,47 @@ public class MemoryWarpScriptStack implements WarpScriptStack, Progressable {
     }
     
     return symbol;
+  }
+  
+  @Override
+  public void signal(Signal signal) {
+    //
+    // Only set the signal is 'signal' is of higher priority than the current
+    // signal
+    //
+    
+    // Only set the signal if the stack is not yet signaled or if 'signal' is
+    // of higher priority than the current signal
+
+    synchronized(this) {
+      if (!this.signaled || this.signal.ordinal() < signal.ordinal()) {
+        this.signal = signal;
+        this.signaled = true;
+      }
+    }
+  }
+  
+  @Override
+  public void handleSignal() throws WarpScriptATCException {
+    if (this.signaled) {
+      doSignal();
+    }
+  }
+  
+  private void doSignal() throws WarpScriptATCException {
+    synchronized(this) {
+      switch (this.signal) {
+        case STOP: 
+          // Clear the signal
+          this.signal = null;
+          this.signaled = false;
+          throw new WarpScriptStopException("Execution received STOP signal.");
+        case KILL:
+          // The signal is retained
+          throw new WarpScriptKillException("Execution received KILL signal.");
+        default:
+      }            
+    }
+
   }
 }

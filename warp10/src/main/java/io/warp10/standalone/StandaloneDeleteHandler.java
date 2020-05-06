@@ -16,9 +16,42 @@
 
 package io.warp10.standalone;
 
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.thrift.TDeserializer;
+import org.apache.thrift.TException;
+import org.apache.thrift.TSerializer;
+import org.apache.thrift.protocol.TCompactProtocol;
+import org.eclipse.jetty.server.Request;
+import org.eclipse.jetty.server.handler.AbstractHandler;
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
+import org.joda.time.format.ISODateTimeFormat;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.warp10.ThrowableUtils;
 import io.warp10.WarpConfig;
 import io.warp10.WarpManager;
+import io.warp10.WarpURLDecoder;
 import io.warp10.continuum.Configuration;
 import io.warp10.continuum.LogUtil;
 import io.warp10.continuum.TimeSource;
@@ -42,44 +75,6 @@ import io.warp10.quasar.token.thrift.data.WriteToken;
 import io.warp10.script.WarpScriptException;
 import io.warp10.sensision.Sensision;
 import io.warp10.warp.sdk.IngressPlugin;
-
-import java.io.File;
-import java.io.FileDescriptor;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
-import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.text.ParseException;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
-import java.util.regex.Matcher;
-
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
-
-import org.apache.commons.io.output.FileWriterWithEncoding;
-import org.apache.commons.lang3.JavaVersion;
-import org.apache.commons.lang3.SystemUtils;
-import org.apache.thrift.TDeserializer;
-import org.apache.thrift.TException;
-import org.apache.thrift.TSerializer;
-import org.apache.thrift.protocol.TCompactProtocol;
-import org.eclipse.jetty.server.Request;
-import org.eclipse.jetty.server.handler.AbstractHandler;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
-import org.joda.time.format.ISODateTimeFormat;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 public class StandaloneDeleteHandler extends AbstractHandler {
   
@@ -268,6 +263,8 @@ public class StandaloneDeleteHandler extends AbstractHandler {
     String producer = Tokens.getUUID(writeToken.getProducerId());
     String owner = Tokens.getUUID(writeToken.getOwnerId());
       
+    boolean expose = writeToken.getAttributesSize() > 0 && writeToken.getAttributes().containsKey(Constants.TOKEN_ATTR_EXPOSE);
+    
     //
     // For delete operations, producer and owner MUST be equal
     //
@@ -294,7 +291,19 @@ public class StandaloneDeleteHandler extends AbstractHandler {
     
     String startstr = request.getParameter(Constants.HTTP_PARAM_START);
     String endstr = request.getParameter(Constants.HTTP_PARAM_END);
-          
+     
+    //
+    // Extract nocache/nopersist
+    //
+    
+    boolean nocache = null != request.getParameter(StandaloneAcceleratedStoreClient.NOCACHE);
+    boolean nopersist = null != request.getParameter(StandaloneAcceleratedStoreClient.NOPERSIST);
+
+    if (nocache && nopersist) {
+      response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Cannot specify both '" + StandaloneAcceleratedStoreClient.NOCACHE + "' and '" + StandaloneAcceleratedStoreClient.NOPERSIST + "'.");;
+      return;
+    }
+
     //
     // Extract selector
     //
@@ -307,7 +316,7 @@ public class StandaloneDeleteHandler extends AbstractHandler {
       response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Standalone version does not support the '" + Constants.HTTP_PARAM_MINAGE + "' parameter in delete requests.");
       return;
     }
-    
+        
     boolean dryrun = null != request.getParameter(Constants.HTTP_PARAM_DRYRUN);
     
     File loggingFile = null;
@@ -424,11 +433,7 @@ public class StandaloneDeleteHandler extends AbstractHandler {
           return;
         }
         if (startstr.contains("T")) {
-          if (SystemUtils.isJavaVersionAtLeast(JavaVersion.JAVA_1_8)) {
-            start = io.warp10.script.unary.TOTIMESTAMP.parseTimestamp(startstr);
-          } else {
-            start = fmt.parseDateTime(startstr).getMillis() * Constants.TIME_UNITS_PER_MS;
-          }
+          start = io.warp10.script.unary.TOTIMESTAMP.parseTimestamp(startstr);
         } else {
           start = Long.valueOf(startstr);
         }
@@ -440,23 +445,36 @@ public class StandaloneDeleteHandler extends AbstractHandler {
           return;
         }
         if (endstr.contains("T")) {
-          if (SystemUtils.isJavaVersionAtLeast(JavaVersion.JAVA_1_8)) {
-            end = io.warp10.script.unary.TOTIMESTAMP.parseTimestamp(endstr);
-          } else {
-            end = fmt.parseDateTime(endstr).getMillis() * Constants.TIME_UNITS_PER_MS;
-          }
+          end = io.warp10.script.unary.TOTIMESTAMP.parseTimestamp(endstr);
         } else {
           end = Long.valueOf(endstr);
         }
       }
       
-      if (Long.MIN_VALUE == start && Long.MAX_VALUE == end && null == request.getParameter(Constants.HTTP_PARAM_DELETEALL)) {
-        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Parameter " + Constants.HTTP_PARAM_DELETEALL + " should be set when deleting a full range.");
+      boolean metaonly = null != request.getParameter(Constants.HTTP_PARAM_METAONLY);
+      
+      if (Long.MIN_VALUE == start && Long.MAX_VALUE == end && (null == request.getParameter(Constants.HTTP_PARAM_DELETEALL) && !metaonly)) {
+        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Parameter " + Constants.HTTP_PARAM_DELETEALL + " or " + Constants.HTTP_PARAM_METAONLY + " should be set when no time range is specified.");
         return;
       }
       
       if (Long.MIN_VALUE != start || Long.MAX_VALUE != end) {
         hasRange = true;
+      }
+
+      if (metaonly && !Constants.DELETE_METAONLY_SUPPORT) {
+        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Parameter " + Constants.HTTP_PARAM_METAONLY + " cannot be used as metaonly support is not enabled.");
+        return;        
+      }
+      
+      if (metaonly && hasRange) {
+        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Parameter " + Constants.HTTP_PARAM_METAONLY + " can only be set if no range is specified.");
+        return;
+      }
+      
+      if (!hasRange && (nocache || nopersist)) {
+        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Time range is mandatory when specifying '" + StandaloneAcceleratedStoreClient.NOCACHE + "' or '" + StandaloneAcceleratedStoreClient.NOPERSIST + "'.");
+        return;
       }
       
       if (start > end) {
@@ -479,7 +497,7 @@ public class StandaloneDeleteHandler extends AbstractHandler {
         return;
       }
       
-      String classSelector = URLDecoder.decode(m.group(1), StandardCharsets.UTF_8.name());
+      String classSelector = WarpURLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
       String labelsSelection = m.group(2);
       
       Map<String,String> labelsSelectors;
@@ -507,6 +525,25 @@ public class StandaloneDeleteHandler extends AbstractHandler {
       lblsSels.add(labelsSelectors);
       
       DirectoryRequest drequest = new DirectoryRequest();
+      
+      Long activeAfter = null == request.getParameter(Constants.HTTP_PARAM_ACTIVEAFTER) ? null : Long.parseLong(request.getParameter(Constants.HTTP_PARAM_ACTIVEAFTER));
+      Long quietAfter = null == request.getParameter(Constants.HTTP_PARAM_QUIETAFTER) ? null : Long.parseLong(request.getParameter(Constants.HTTP_PARAM_QUIETAFTER));
+
+      if (!Constants.DELETE_ACTIVITY_SUPPORT) {
+        if (null != activeAfter || null != quietAfter) {
+          response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Activity based selection is disabled by configuration.");
+          return;
+        }
+      }
+      
+      if (null != activeAfter) {
+        drequest.setActiveAfter(activeAfter);
+      }
+      
+      if (null != quietAfter) {
+        drequest.setQuietAfter(quietAfter);
+      }
+      
       drequest.setClassSelectors(clsSels);
       drequest.setLabelsSelectors(lblsSels);
 
@@ -524,6 +561,18 @@ public class StandaloneDeleteHandler extends AbstractHandler {
       
       metadatas.sort(MetadataIdComparator.COMPARATOR);
       
+      if (nocache) {
+        StandaloneAcceleratedStoreClient.nocache();
+      } else {
+        StandaloneAcceleratedStoreClient.cache();        
+      }
+      
+      if (nopersist) {
+        StandaloneAcceleratedStoreClient.nopersist();
+      } else {
+        StandaloneAcceleratedStoreClient.persist();        
+      }
+
       for (Metadata metadata: metadatas) {                
         //
         // Remove data
@@ -537,7 +586,9 @@ public class StandaloneDeleteHandler extends AbstractHandler {
               continue;
             }
           }
-          localCount = this.storeClient.delete(writeToken, metadata, start, end);
+          if (!metaonly) {
+            localCount = this.storeClient.delete(writeToken, metadata, start, end);
+          }
         }
 
         //
@@ -553,10 +604,11 @@ public class StandaloneDeleteHandler extends AbstractHandler {
         count += localCount;
 
         sb.setLength(0);
-        GTSHelper.metadataToString(sb, metadata.getName(), metadata.getLabels());
+        GTSHelper.metadataToString(sb, metadata.getName(), metadata.getLabels(), expose);
         
         if (metadata.getAttributesSize() > 0) {
-          GTSHelper.labelsToString(sb, metadata.getAttributes());
+          // Always expose attributes
+          GTSHelper.labelsToString(sb, metadata.getAttributes(), true);
         } else {
           sb.append("{}");
         }
@@ -577,7 +629,7 @@ public class StandaloneDeleteHandler extends AbstractHandler {
         gts++;
 
         // Log detailed metrics for this GTS owner and app
-        Map<String, String> labels = new HashMap<>();
+        Map<String, String> labels = new HashMap<String, String>();
         labels.put(SensisionConstants.SENSISION_LABEL_OWNER, metadata.getLabels().get(Constants.OWNER_LABEL));
         labels.put(SensisionConstants.SENSISION_LABEL_APPLICATION, metadata.getLabels().get(Constants.APPLICATION_LABEL));
         Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STANDALONE_DELETE_DATAPOINTS_PEROWNERAPP, labels, localCount);

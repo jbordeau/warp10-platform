@@ -32,7 +32,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.io.StringReader;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -86,7 +85,7 @@ public class WarpConfig {
       // If a file starts with '@', treat it as a file containing lists of files
       //
 
-      List<String> filenames = new ArrayList<>(Arrays.asList(files));
+      List<String> filenames = new ArrayList<String>(Arrays.asList(files));
 
       StringBuilder sb = new StringBuilder();
 
@@ -236,9 +235,7 @@ public class WarpConfig {
 
       // Remove URL encoding if a '%' sign is present in the token
       for (int i = 0; i < tokens.length; i++) {
-        if (tokens[i].contains("%")) {
-          tokens[i] = URLDecoder.decode(tokens[i], StandardCharsets.UTF_8.name());
-        }
+        tokens[i] = WarpURLDecoder.decode(tokens[i], StandardCharsets.UTF_8);
         tokens[i] = tokens[i].trim();
       }
 
@@ -275,17 +272,13 @@ public class WarpConfig {
 
         try {
           // URL Decode name/value if needed
-          if (name.contains("%")) {
-            name = URLDecoder.decode(name, StandardCharsets.UTF_8.name());
-          }
-          if (value.contains("%")) {
-            value = URLDecoder.decode(value, StandardCharsets.UTF_8.name());
-          }
+          name = WarpURLDecoder.decode(name, StandardCharsets.UTF_8);
+          value = WarpURLDecoder.decode(value, StandardCharsets.UTF_8);
 
           // Override property
           properties.setProperty(name, value);
         } catch (Exception e) {
-          System.err.println("Error decoding environment variable '" + entry.getKey() + "' = '" + entry.getValue() + "', using raw values.");
+          System.err.println("Warning: failed to decode environment variable '" + entry.getKey() + "' = '" + entry.getValue() + "', using raw value.");
           properties.setProperty(entry.getKey(), entry.getValue());
         }
       }
@@ -302,12 +295,8 @@ public class WarpConfig {
 
         try {
           // URL Decode name/value if needed
-          if (name.contains("%")) {
-            name = URLDecoder.decode(name, StandardCharsets.UTF_8.name());
-          }
-          if (value.contains("%")) {
-            value = URLDecoder.decode(value, StandardCharsets.UTF_8.name());
-          }
+          name = WarpURLDecoder.decode(name, StandardCharsets.UTF_8);
+          value = WarpURLDecoder.decode(value, StandardCharsets.UTF_8);
 
           // Override property
           properties.setProperty(name, value);
@@ -435,15 +424,32 @@ public class WarpConfig {
       System.exit(-1);
     }
 
-    String[] files = Arrays.copyOf(args, args.length - 1);
-    String key = args[args.length - 1];
+    //
+    // Copy file arguments up to '.'
+    //
+    
+    List<String> lfiles = new ArrayList<String>();
+    
+    int keycount = 0;
+    
+    for (int i = 0; i < args.length; i++) {
+      if (".".equals(args[i])) {
+        keycount = args.length - i - 1;
+        break;
+      }
+      lfiles.add(args[i]);
+    }
+    
+    String[] files = lfiles.toArray(new String[lfiles.size()]);
+
     try {
       WarpConfig.setProperties(files);
-      properties = WarpConfig.getProperties();
-      System.out.println(key + "=" + WarpConfig.getProperty(key));
+      
+      for (int i = args.length - keycount; i < args.length; i++) {
+        System.out.println("@CONF@ " + args[i] + "=" + WarpConfig.getProperty(args[i]));        
+      }
     } catch (Exception e) {
       e.printStackTrace();
     }
-
   }
 }

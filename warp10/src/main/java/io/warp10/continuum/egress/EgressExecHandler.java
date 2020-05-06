@@ -16,27 +16,6 @@
 
 package io.warp10.continuum.egress;
 
-import io.warp10.ThrowableUtils;
-import io.warp10.continuum.BootstrapManager;
-import io.warp10.continuum.Configuration;
-import io.warp10.continuum.LogUtil;
-import io.warp10.continuum.TimeSource;
-import io.warp10.continuum.sensision.SensisionConstants;
-import io.warp10.continuum.store.Constants;
-import io.warp10.continuum.store.DirectoryClient;
-import io.warp10.continuum.store.StoreClient;
-import io.warp10.continuum.thrift.data.LoggingEvent;
-import io.warp10.crypto.KeyStore;
-import io.warp10.script.WarpScriptException;
-import io.warp10.script.WarpScriptLib;
-import io.warp10.script.WarpScriptStack;
-import io.warp10.script.WarpScriptStopException;
-import io.warp10.script.functions.AUTHENTICATE;
-import io.warp10.script.MemoryWarpScriptStack;
-import io.warp10.script.StackUtils;
-import io.warp10.script.WarpScriptStack.StackContext;
-import io.warp10.sensision.Sensision;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -49,10 +28,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
-import java.util.zip.GZIPInputStream;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import java.util.zip.GZIPInputStream;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
@@ -62,6 +41,29 @@ import org.eclipse.jetty.server.Request;
 import org.eclipse.jetty.server.handler.AbstractHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import io.warp10.ThrowableUtils;
+import io.warp10.continuum.BootstrapManager;
+import io.warp10.continuum.Configuration;
+import io.warp10.continuum.LogUtil;
+import io.warp10.continuum.TimeSource;
+import io.warp10.continuum.sensision.SensisionConstants;
+import io.warp10.continuum.store.Constants;
+import io.warp10.continuum.store.DirectoryClient;
+import io.warp10.continuum.store.StoreClient;
+import io.warp10.continuum.thrift.data.LoggingEvent;
+import io.warp10.crypto.KeyStore;
+import io.warp10.script.MemoryWarpScriptStack;
+import io.warp10.script.StackUtils;
+import io.warp10.script.WarpScriptException;
+import io.warp10.script.WarpScriptLib;
+import io.warp10.script.WarpScriptStack;
+import io.warp10.script.WarpScriptStack.StackContext;
+import io.warp10.script.WarpScriptStackRegistry;
+import io.warp10.script.WarpScriptStopException;
+import io.warp10.script.ext.stackps.StackPSWarpScriptExtension;
+import io.warp10.script.functions.AUTHENTICATE;
+import io.warp10.sensision.Sensision;
 
 public class EgressExecHandler extends AbstractHandler {
 
@@ -138,7 +140,12 @@ public class EgressExecHandler extends AbstractHandler {
     //
     
     WarpScriptStack stack = new MemoryWarpScriptStack(this.storeClient, this.directoryClient);
-
+    stack.setAttribute(WarpScriptStack.ATTRIBUTE_NAME, "[EgressExecHandler " + Thread.currentThread().getName() + "]");
+    
+    if (null != req.getHeader(StackPSWarpScriptExtension.HEADER_SESSION)) {
+      stack.setAttribute(StackPSWarpScriptExtension.ATTRIBUTE_SESSION, req.getHeader(StackPSWarpScriptExtension.HEADER_SESSION));
+    }
+    
     Throwable t = null;
 
     StringBuilder scriptSB = new StringBuilder();
@@ -191,15 +198,17 @@ public class EgressExecHandler extends AbstractHandler {
       // Extract parameters from the path info and set their value as symbols
       //
       
-      String pathInfo = req.getPathInfo().substring(target.length());
+      String pathInfo = req.getPathInfo();
       
-      if (null != pathInfo && pathInfo.length() > 0) {
-        pathInfo = pathInfo.substring(1);
+      if (pathInfo != null && pathInfo.length() > Constants.API_ENDPOINT_EXEC.length()) {
+        pathInfo = pathInfo.substring(Constants.API_ENDPOINT_EXEC.length() + 1);
         String[] tokens = pathInfo.split("/");
 
         for (String token: tokens) {
           String[] subtokens = token.split("=");
           
+          // Legit uses of URLDecoder.decode, do not replace by WarpURLDecoder
+          // as the encoding is performed by the browser
           subtokens[0] = URLDecoder.decode(subtokens[0], StandardCharsets.UTF_8.name());
           subtokens[1] = URLDecoder.decode(subtokens[1], StandardCharsets.UTF_8.name());
           
@@ -398,15 +407,25 @@ public class EgressExecHandler extends AbstractHandler {
         } catch (WarpScriptException ee) {
         }
 
-        try { StackUtils.toJSON(pw, stack, debugDepth); } catch (WarpScriptException ee) {}
+        try {
+          // As the resulting JSON is streamed, there is no need to limit its size.
+          StackUtils.toJSON(pw, stack, debugDepth, Long.MAX_VALUE);
+        } catch (WarpScriptException ee) {
+        }
 
       } else {
-        String prefix = "ERROR line #" + lineno + ": ";
-        String msg = prefix + ThrowableUtils.getErrorMessage(t, Constants.MAX_HTTP_REASON_LENGTH - prefix.length());
-        resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, msg);
+        // Check if the response is already committed. This may happen if the writer has already been written to and an
+        // error happened during the write, for instance a stack overflow caused by infinite recursion.
+        if(!resp.isCommitted()) {
+          String prefix = "ERROR line #" + lineno + ": ";
+          String msg = prefix + ThrowableUtils.getErrorMessage(t, Constants.MAX_HTTP_REASON_LENGTH - prefix.length());
+          resp.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, msg);
+        }
         return;
       }
     } finally {
+      WarpScriptStackRegistry.unregister(stack);
+      
       // Clear this metric in case there was an exception
       Sensision.update(SensisionConstants.SENSISION_CLASS_WARPSCRIPT_REQUESTS, Sensision.EMPTY_LABELS, 1);
       Sensision.update(SensisionConstants.SENSISION_CLASS_WARPSCRIPT_TIME_US, Sensision.EMPTY_LABELS, (long) ((System.nanoTime() - now) / 1000));
