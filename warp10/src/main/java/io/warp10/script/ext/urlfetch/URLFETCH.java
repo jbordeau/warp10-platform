@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -68,6 +68,12 @@ public class URLFETCH extends NamedWarpScriptFunction implements WarpScriptStack
     }
 
     Object o = stack.pop();
+
+    Map<Object, Object> properties = new HashMap<Object, Object>();
+    if (o instanceof Map) {
+      properties = (Map<Object, Object>) o;
+      o = stack.pop();
+    }
 
     if (!(o instanceof String) && !(o instanceof List)) {
       throw new WarpScriptException(getName() + " expects a URL or list thereof on top of the stack.");
@@ -144,12 +150,16 @@ public class URLFETCH extends NamedWarpScriptFunction implements WarpScriptStack
 
       try {
         conn = (HttpURLConnection) url.openConnection();
-        
+
         if (null != url.getUserInfo()) {
           String basicAuth = "Basic " + new String(Base64.encodeBase64String(url.getUserInfo().getBytes(StandardCharsets.UTF_8)));
-          conn.setRequestProperty ("Authorization", basicAuth);
+          properties.put("Authorization", basicAuth);
         }
-        
+
+        for (Map.Entry<Object, Object> prop: properties.entrySet()) {
+          conn.setRequestProperty(String.valueOf(prop.getKey()), String.valueOf(prop.getValue()));
+        }
+
         conn.setDoInput(true);
         conn.setDoOutput(false);
         conn.setRequestMethod("GET");
@@ -166,18 +176,21 @@ public class URLFETCH extends NamedWarpScriptFunction implements WarpScriptStack
           in = conn.getErrorStream();
         }
 
-        while (true) {
-          int len = in.read(buf);
+        // The response can have no body, check for nullity before reading.
+        if (null != in) {
+          while (true) {
+            int len = in.read(buf);
 
-          if (len < 0) {
-            break;
+            if (len < 0) {
+              break;
+            }
+
+            if (urlfetchSize.get() + baos.size() + len > (long) UrlFetchWarpScriptExtension.getLongAttribute(stack, UrlFetchWarpScriptExtension.ATTRIBUTE_URLFETCH_MAXSIZE)) {
+              throw new WarpScriptException(getName() + " would exceed maximum size of content which can be retrieved via URLFETCH (" + UrlFetchWarpScriptExtension.getLongAttribute(stack, UrlFetchWarpScriptExtension.ATTRIBUTE_URLFETCH_MAXSIZE) + " bytes)");
+            }
+
+            baos.write(buf, 0, len);
           }
-
-          if (urlfetchSize.get() + baos.size() + len > (long) UrlFetchWarpScriptExtension.getLongAttribute(stack, UrlFetchWarpScriptExtension.ATTRIBUTE_URLFETCH_MAXSIZE)) {
-            throw new WarpScriptException(getName() + " would exceed maximum size of content which can be retrieved via URLFETCH (" + UrlFetchWarpScriptExtension.getLongAttribute(stack, UrlFetchWarpScriptExtension.ATTRIBUTE_URLFETCH_MAXSIZE) + " bytes)");
-          }
-
-          baos.write(buf, 0, len);
         }
 
         urlfetchSize.addAndGet(baos.size());

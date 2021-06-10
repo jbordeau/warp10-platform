@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -44,15 +44,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
+import io.warp10.CustomThreadFactory;
 import org.apache.thrift.TException;
 import org.apache.thrift.TSerializer;
 import org.apache.thrift.protocol.TCompactProtocol;
@@ -89,34 +88,6 @@ import kafka.producer.ProducerConfig;
  * Greatly inspired by Sensision's own ScriptRunner
  */
 public class ScriptRunner extends Thread {
-
-  static class NamedThreadFactory implements ThreadFactory {
-    final ThreadGroup group;
-    final AtomicInteger threadNumber = new AtomicInteger(1);
-
-    NamedThreadFactory() {
-      SecurityManager s = System.getSecurityManager();
-      if (null == s) {
-        group = Thread.currentThread().getThreadGroup();
-      } else {
-        group = s.getThreadGroup();
-      }
-    }
-
-    public Thread newThread(Runnable r) {
-      Thread t = new Thread(group, r, "[Warp ScriptRunner Thread #" + threadNumber.getAndIncrement() + "]", 0);
-
-      if (t.isDaemon()) {
-        t.setDaemon(false);
-      }
-
-      if (Thread.NORM_PRIORITY != t.getPriority()) {
-        t.setPriority(Thread.NORM_PRIORITY);
-      }
-
-      return t;
-    }
-  }
 
   protected static final byte[] CLEAR = "\nCLEAR\n".getBytes(StandardCharsets.UTF_8);
 
@@ -251,7 +222,7 @@ public class ScriptRunner extends Thread {
       this.minperiod = Long.parseLong(config.getProperty(Configuration.RUNNER_MINPERIOD));
       this.endpoint = config.getProperty(Configuration.RUNNER_ENDPOINT);
 
-      ThreadPoolExecutor runnersExecutor = new ThreadPoolExecutor(nthreads, nthreads, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nthreads * 256), new NamedThreadFactory());
+      ThreadPoolExecutor runnersExecutor = new ThreadPoolExecutor(nthreads, nthreads, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nthreads * 256), new CustomThreadFactory("Warp ScriptRunner Thread"));
       runnersExecutor.allowCoreThreadTimeOut(true);
 
       this.executor = runnersExecutor;
@@ -288,7 +259,7 @@ public class ScriptRunner extends Thread {
       int nthreads = Integer.parseInt(config.getProperty(Configuration.RUNNER_KAFKA_NTHREADS));
       long commitPeriod = Long.parseLong(config.getProperty(Configuration.RUNNER_KAFKA_COMMITPERIOD));
 
-      ThreadPoolExecutor runnersExecutor = new ThreadPoolExecutor(nthreads, nthreads, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nthreads * 256), new NamedThreadFactory());
+      ThreadPoolExecutor runnersExecutor = new ThreadPoolExecutor(nthreads, nthreads, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nthreads * 256), new CustomThreadFactory("Warp ScriptRunner Thread"));
       runnersExecutor.allowCoreThreadTimeOut(true);
 
       this.executor = runnersExecutor;
@@ -307,7 +278,7 @@ public class ScriptRunner extends Thread {
       this.topic = config.getProperty(Configuration.RUNNER_KAFKA_TOPIC);
 
       Properties props = new Properties();
-      // @see http://kafka.apache.org/documentation.html#producerconfigs
+      // @see <a href="http://kafka.apache.org/documentation.html#producerconfigs">http://kafka.apache.org/documentation.html#producerconfigs</a>
       props.setProperty("metadata.broker.list", props.getProperty(Configuration.RUNNER_KAFKA_BROKERLIST));
       if (null != props.getProperty(Configuration.RUNNER_KAFKA_PRODUCER_CLIENTID)) {
         props.setProperty("client.id", props.getProperty(Configuration.RUNNER_KAFKA_PRODUCER_CLIENTID));
@@ -845,21 +816,7 @@ public class ScriptRunner extends Thread {
   }
 
   private void extractKeys(Properties props) {
-    String keyspec = props.getProperty(Configuration.RUNNER_KAFKA_AES);
-
-    if (null != keyspec) {
-      byte[] key = this.keystore.decodeKey(keyspec);
-      Preconditions.checkArgument(16 == key.length || 24 == key.length || 32 == key.length, "Key " + Configuration.RUNNER_KAFKA_AES + " MUST be 128, 192 or 256 bits long.");
-      this.keystore.setKey(KeyStore.AES_KAFKA_RUNNER, key);
-    }
-
-    keyspec = props.getProperty(Configuration.RUNNER_KAFKA_MAC);
-
-    if (null != keyspec) {
-      byte[] key = this.keystore.decodeKey(keyspec);
-      Preconditions.checkArgument(16 == key.length, "Key " + Configuration.RUNNER_KAFKA_MAC + " MUST be 128 bits long.");
-      this.keystore.setKey(KeyStore.SIPHASH_KAFKA_RUNNER, key);
-    }
+    KeyStore.checkAndSetKey(keystore, KeyStore.SIPHASH_KAFKA_RUNNER, props, Configuration.RUNNER_KAFKA_MAC, 128);
 
     this.keystore.forget();
   }

@@ -1,5 +1,5 @@
 //
-//   Copyright 2020  SenX S.A.S.
+//   Copyright 2020-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
+import io.warp10.CustomThreadFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,8 +44,8 @@ import io.warp10.continuum.store.GTSDecoderIterator;
 import io.warp10.continuum.store.MetadataIterator;
 import io.warp10.continuum.store.StoreClient;
 import io.warp10.continuum.store.thrift.data.DirectoryRequest;
+import io.warp10.continuum.store.thrift.data.FetchRequest;
 import io.warp10.continuum.store.thrift.data.Metadata;
-import io.warp10.quasar.token.thrift.data.ReadToken;
 import io.warp10.quasar.token.thrift.data.WriteToken;
 
 public class StandaloneAcceleratedStoreClient implements StoreClient {
@@ -55,46 +56,57 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
   private final StandaloneChunkedMemoryStore cache;
   private final boolean ephemeral;
 
-  public static final String ATTR_REPORT = "accel.report";
-  public static final String ATTR_NOCACHE = "accel.nocache";
-  public static final String ATTR_NOPERSIST = "accel.nopersist";
-  
-  public static final String NOCACHE = "nocache";
-  public static final String NOPERSIST = "nopersist";
-  
-  public static final String ACCELERATOR_HEADER = "X-Warp10-Accelerator";
-  
   private static StandaloneAcceleratedStoreClient instance = null;
-  
-  /**
-   * Was the last FETCH accelerated for the given Thread?
-   */
-  private static final ThreadLocal<Boolean> accelerated = new ThreadLocal<Boolean>() {
-    protected Boolean initialValue() {
-      return Boolean.FALSE;
-    };
-  };
-  
-  private static final ThreadLocal<Boolean> nocache = new ThreadLocal<Boolean>() {
-    @Override
-    protected Boolean initialValue() {
-      return Boolean.FALSE;
-    }
-  };
-
-  private static final ThreadLocal<Boolean> nopersist = new ThreadLocal<Boolean>() {
-    @Override
-    protected Boolean initialValue() {
-      return Boolean.FALSE;
-    }
-  };
-
+    
   public StandaloneAcceleratedStoreClient(DirectoryClient dir, StoreClient persistentStore) {
         
     if (null != instance) {
       throw new RuntimeException(StandaloneAcceleratedStoreClient.class.getName() + " can only be instantiated once.");
     }
             
+    //
+    // Extract strategies from configuration
+    //
+    
+    String defaultStrategy = WarpConfig.getProperty(Configuration.ACCELERATOR_DEFAULT_WRITE, "");
+    
+    if (defaultStrategy.contains(AcceleratorConfig.NOCACHE)) {
+      AcceleratorConfig.defaultWriteNocache = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.CACHE)) {
+      AcceleratorConfig.defaultWriteNocache = false;
+    }
+    if (defaultStrategy.contains(AcceleratorConfig.NOPERSIST)) {
+      AcceleratorConfig.defaultWriteNopersist = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.PERSIST)) {
+      AcceleratorConfig.defaultWriteNopersist = false;
+    }
+    
+    defaultStrategy = WarpConfig.getProperty(Configuration.ACCELERATOR_DEFAULT_DELETE, "");
+
+    if (defaultStrategy.contains(AcceleratorConfig.NOCACHE)) {
+      AcceleratorConfig.defaultDeleteNocache = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.CACHE)) {
+      AcceleratorConfig.defaultDeleteNocache = false;
+    }
+    if (defaultStrategy.contains(AcceleratorConfig.NOPERSIST)) {
+      AcceleratorConfig.defaultDeleteNopersist = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.PERSIST)) {
+      AcceleratorConfig.defaultDeleteNopersist = false;
+    }
+    
+    defaultStrategy = WarpConfig.getProperty(Configuration.ACCELERATOR_DEFAULT_READ, "");
+    
+    if (defaultStrategy.contains(AcceleratorConfig.NOCACHE)) {
+      AcceleratorConfig.defaultReadNocache = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.CACHE)) {
+      AcceleratorConfig.defaultReadNocache = false;
+    }
+    if (defaultStrategy.contains(AcceleratorConfig.NOPERSIST)) {
+      AcceleratorConfig.defaultReadNopersist = true;
+    } else if (defaultStrategy.contains(AcceleratorConfig.PERSIST)) {
+      AcceleratorConfig.defaultReadNopersist = false;
+    }
+    
     //
     // Force accelerator parameters to be replicated on inmemory ones and clear other in memory params
     //
@@ -170,7 +182,7 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
               
         int nthreads = Integer.parseInt(WarpConfig.getProperty(Configuration.ACCELERATOR_PRELOAD_POOLSIZE, "8"));
         
-        ThreadPoolExecutor exec = new ThreadPoolExecutor(nthreads, nthreads, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(nthreads));
+        ThreadPoolExecutor exec = new ThreadPoolExecutor(nthreads, nthreads, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(nthreads), new CustomThreadFactory("Warp StandaloneAcceleratedStoreClient Thread"));
         final AtomicReference<Throwable> error = new AtomicReference<Throwable>();
         
         while(iter.hasNext()) {
@@ -188,7 +200,12 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
               @Override
               public void run() {
                 try {
-                  GTSDecoderIterator decoders = persistent.fetch(null, fbatch, now, then, count, 0, 1.0D, false, 0, 0);
+                  FetchRequest req = new FetchRequest();
+                  req.setMetadatas(fbatch);
+                  req.setCount(count);
+                  req.setNow(now);
+                  req.setThents(then);
+                  GTSDecoderIterator decoders = persistent.fetch(req);
                   
                   while(decoders.hasNext()) {
                     GTSDecoder decoder = decoders.next();
@@ -238,6 +255,9 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
     }
     
     instance = this;
+    AcceleratorConfig.setChunkCount(instance.cache.getChunkCount());
+    AcceleratorConfig.setChunkSpan(instance.cache.getChunkSpan());
+    AcceleratorConfig.instantiated();
   }
   
   @Override
@@ -247,17 +267,17 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
   
   @Override
   public long delete(WriteToken token, Metadata metadata, long start, long end) throws IOException {
-    if (!nocache.get()) {
+    if (!AcceleratorConfig.nocache.get()) {
       cache.delete(token, metadata, start, end);
     }
-    if (!nopersist.get()) {
+    if (!AcceleratorConfig.nopersist.get()) {
       persistent.delete(token, metadata, start, end);
     }
     return 0;
   }
   
   @Override
-  public GTSDecoderIterator fetch(ReadToken token, List<Metadata> metadatas, long now, long then, long count, long skip, double sample, boolean writeTimestamp, long preBoundary, long postBoundary) throws IOException {
+  public GTSDecoderIterator fetch(FetchRequest req) throws IOException {
     //
     // If the fetch has both a time range that is larger than the cache range, we will only use
     // the persistent backend to ensure a correct fetch. Same goes with boundaries which could extend outside the
@@ -276,104 +296,36 @@ public class StandaloneAcceleratedStoreClient implements StoreClient {
     // unless ACCEL.NOCACHE was called.
     //
     
-    if (this.ephemeral && 1 == count && Long.MAX_VALUE == now && !nocache.get()) {
-      accelerated.set(Boolean.TRUE);
-      return this.cache.fetch(token, metadatas, now, then, count, skip, sample, writeTimestamp, preBoundary, postBoundary);      
+    if (this.ephemeral && 1L == req.getCount() && Long.MAX_VALUE == req.getNow() && !AcceleratorConfig.nocache.get()) {
+      AcceleratorConfig.accelerated.set(Boolean.TRUE);
+      return this.cache.fetch(req);      
     }
-    
+        
     // Use the persistent store if the accelerator is in ephemeral mode,
     // if the requested time range is larger than the accelerated range or
     // if boundaries were requested, unless ACCEL.NOPERSIST was called 
-    if ((this.ephemeral || (now > cacheend || then < cachestart) || preBoundary > 0 || postBoundary > 0 || nocache.get()) && !nopersist.get()) {
-      accelerated.set(Boolean.FALSE);
-      return this.persistent.fetch(token, metadatas, now, then, count, skip, sample, writeTimestamp, preBoundary, postBoundary);
+    if ((this.ephemeral || (req.getNow() > cacheend || req.getThents() < cachestart) || req.getPreBoundary() > 0 || req.getPostBoundary() > 0 || AcceleratorConfig.nocache.get()) && !AcceleratorConfig.nopersist.get()) {
+      AcceleratorConfig.accelerated.set(Boolean.FALSE);
+      return this.persistent.fetch(req);
     }
     
     // Last resort, use the cache, unless it is disabled in which case an exception is thrown
-    if (nocache.get()) {
+    if (AcceleratorConfig.nocache.get()) {
       throw new IOException("Cache and persistent store access disabled.");
     }
     
-    accelerated.set(Boolean.TRUE);
-    return this.cache.fetch(token, metadatas, now, then, count, skip, sample, writeTimestamp, preBoundary, postBoundary);
+    AcceleratorConfig.accelerated.set(Boolean.TRUE);
+    return this.cache.fetch(req);
   }
   
   @Override
   public void store(GTSEncoder encoder) throws IOException {    
-    if (!nopersist.get()) {
+    if (!AcceleratorConfig.nopersist.get()) {
       persistent.store(encoder);
     }
     
-    if (!nocache.get()) {
+    if (!AcceleratorConfig.nocache.get()) {
       cache.store(encoder);
-    }
-  }
-  
-  public static final void nocache() {
-    if (null != instance) {
-      nocache.set(Boolean.TRUE);
-    }
-  }
-  
-  public static final void cache() {
-    if (null != instance) {
-      nocache.set(Boolean.FALSE);
-    }
-  }
-  
-  public static final void nopersist() {
-    if (null != instance) {
-      nopersist.set(Boolean.TRUE);
-    }
-  }
-  
-  public static final void persist() {
-    if (null != instance) {   
-      nopersist.set(Boolean.FALSE);
-    }
-  }
-  
-  public static final boolean isInstantiated() {
-    return (null != instance);
-  }
-  
-  public static final boolean accelerated() {
-    if (null != instance) {
-      return accelerated.get();
-    } else {
-      return false;
-    }
-  }
-  
-  public static final boolean isCache() {
-    if (null != instance) {
-      return !nocache.get();
-    } else {
-      return false;
-    }
-  }
-  
-  public static final boolean isPersist() {
-    if (null != instance) {
-      return !nopersist.get();
-    } else {
-      return true;
-    }
-  }
-  
-  public static int getChunkCount() {
-    if (null != instance) {
-      return instance.cache.getChunkCount();
-    } else {
-      return 0;
-    }
-  }
-  
-  public static long getChunkSpan() {
-    if (null != instance) {
-      return instance.cache.getChunkSpan();
-    } else {
-      return 0L;
     }
   }
 }

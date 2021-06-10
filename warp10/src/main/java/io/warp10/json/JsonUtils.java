@@ -1,5 +1,5 @@
 //
-//   Copyright 2020  SenX S.A.S.
+//   Copyright 2020-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -26,16 +26,12 @@ import com.fasterxml.jackson.databind.BeanDescription;
 import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationConfig;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.ser.BeanSerializer;
 import com.fasterxml.jackson.databind.ser.BeanSerializerModifier;
 import com.fasterxml.jackson.databind.ser.impl.UnknownSerializer;
-import io.warp10.continuum.gts.GTSEncoder;
-import io.warp10.continuum.gts.GeoTimeSerie;
-import io.warp10.continuum.store.thrift.data.Metadata;
-import io.warp10.script.NamedWarpScriptFunction;
-import io.warp10.script.WarpScriptStack;
 
 import java.io.IOException;
 import java.io.StringWriter;
@@ -57,33 +53,39 @@ public class JsonUtils {
   }
 
   /**
-   * Used to swap UnknownSerializer and BeanSerializer for CustomEncodersSerializer.
+   * Used to swap UnknownSerializer and BeanSerializer for CustomSerializer.
    */
   public static class NotSerializedToCustomSerializedModifier extends BeanSerializerModifier {
     @Override
     public JsonSerializer<?> modifySerializer(SerializationConfig config, BeanDescription beanDesc, JsonSerializer<?> serializer) {
       if (serializer instanceof UnknownSerializer || serializer instanceof BeanSerializer) {
-        return customEncodersSerializer;
+        return CUSTOM_SERIALIZER;
       } else {
         return serializer;
       }
     }
   }
 
-  public static class CustomEncodersSerializer extends JsonSerializer<Object> {
+  /**
+   * Handles custom serialization based on transformers.
+   */
+  public static class CustomSerializer extends JsonSerializer<Object> {
     @Override
     public void serialize(Object value, JsonGenerator gen, SerializerProvider serializers) throws IOException {
-      if (null != encoders && !encoders.isEmpty()) {
-        StringBuilder sb = new StringBuilder();
-        boolean encoded = false;
-        for (JsonEncoder encoder: encoders) {
-          encoded = encoder.addElement(sb, value);
-          if (encoded) {
+      if (null != transformers && !transformers.isEmpty()) {
+        JsonTransformer.TransformationResult transfRes = null;
+        for (JsonTransformer transformer: transformers) {
+          transfRes = transformer.transform(value);
+          if (null != transfRes && transfRes.transformed) {
             break;
           }
         }
-        if (encoded) {
-          gen.writeRaw(sb.toString());
+        if (null != transfRes && transfRes.transformed) {
+          if (transfRes.raw && transfRes.result instanceof String) {
+            gen.writeRawValue((String) transfRes.result);
+          } else {
+            gen.writeObject(transfRes.result);
+          }
         } else {
           // No custom encoders able to encode this object, write null.
           gen.writeNull();
@@ -95,20 +97,61 @@ public class JsonUtils {
     }
   }
 
-  public static final NullKeySerializer nullKeySerializer = new NullKeySerializer();
-  public static final CustomEncodersSerializer customEncodersSerializer = new CustomEncodersSerializer();
+  private static final NullKeySerializer NULL_KEY_SERIALIZER = new NullKeySerializer();
+  private static final CustomSerializer CUSTOM_SERIALIZER = new CustomSerializer();
 
   //
   // ObjectMapper instances are thread-safe, so we can safely use a single static instance.
   //
-  private static final ObjectMapper strictMapper;
-  private static final ObjectMapper looseMapper;
+  private static final ObjectMapper STRICT_MAPPER;
+  private static final ObjectMapper STRICT_MAPPER_PRETTY;
+  private static final ObjectMapper LOOSE_MAPPER;
+  private static final ObjectMapper LOOSE_MAPPER_PRETTY;
 
-  public interface JsonEncoder {
-    boolean addElement(StringBuilder sb, Object o);
+  public interface JsonTransformer {
+    class TransformationResult {
+
+      /**
+       * Whether the transformer managed to transform the given object or not.
+       * If false, result and raw fields are ignored.
+       */
+      private final boolean transformed;
+
+      /**
+       * The result of the transformation.
+       * If raw, the result must be a String and will be added as is in the resulting JSON.
+       * If not raw, the result should be an Object which can be JSONified. Typically Maps, Lists, String, Numbers, Booleans
+       * or even other Objects which are known to have serializer (GTS, Bytes, ...) or handled by other transformers.
+       */
+      private final Object result;
+
+      /**
+       * Whether the result is to be added as is in the resulting JSON.
+       * If true, result must be a String.
+       * If false, result can be any Object which will be JSONified.
+       */
+      private final boolean raw;
+
+      public TransformationResult(boolean transformed, Object result, boolean raw) {
+        this.transformed = transformed;
+        this.result = result;
+        this.raw = raw;
+      }
+    }
+
+    /**
+     * Asks a JsonTransformer implementation if the given object is handled (TransformationResult#transformed=true)
+     * and if it is, the result of the transformation (TransformationResult#result).
+     * This allows the JSON serialization to ask for the conversion of un-serializable objects to serializable ones.
+     * If it is not handled, TransformationResult#result is ignored, so it can be safely set to null.
+     *
+     * @param original The object to be transformed.
+     * @return The result of the transformation.
+     */
+    TransformationResult transform(Object original);
   }
 
-  private static List<JsonEncoder> encoders;
+  private static List<JsonTransformer> transformers;
 
   static {
     //
@@ -141,17 +184,27 @@ public class JsonUtils {
     // Configure strict mapper
     //
     builder.enable(JsonWriteFeature.WRITE_NAN_AS_STRINGS);
-    strictMapper = new ObjectMapper(builder.build());
-    strictMapper.getSerializerProvider().setNullKeySerializer(nullKeySerializer);
-    strictMapper.registerModule(module);
+    STRICT_MAPPER = new ObjectMapper(builder.build());
+    STRICT_MAPPER.getSerializerProvider().setNullKeySerializer(NULL_KEY_SERIALIZER);
+    STRICT_MAPPER.registerModule(module);
+    // Pretty version
+    STRICT_MAPPER_PRETTY = new ObjectMapper(builder.build());
+    STRICT_MAPPER_PRETTY.enable(SerializationFeature.INDENT_OUTPUT);
+    STRICT_MAPPER_PRETTY.getSerializerProvider().setNullKeySerializer(NULL_KEY_SERIALIZER);
+    STRICT_MAPPER_PRETTY.registerModule(module);
 
     //
     // Configure loose mapper
     //
     builder.disable(JsonWriteFeature.WRITE_NAN_AS_STRINGS);
-    looseMapper = new ObjectMapper(builder.build());
-    looseMapper.getSerializerProvider().setNullKeySerializer(nullKeySerializer);
-    looseMapper.registerModule(module);
+    LOOSE_MAPPER = new ObjectMapper(builder.build());
+    LOOSE_MAPPER.getSerializerProvider().setNullKeySerializer(NULL_KEY_SERIALIZER);
+    LOOSE_MAPPER.registerModule(module);
+    // Pretty version
+    LOOSE_MAPPER_PRETTY = new ObjectMapper(builder.build());
+    LOOSE_MAPPER_PRETTY.enable(SerializationFeature.INDENT_OUTPUT);
+    LOOSE_MAPPER_PRETTY.getSerializerProvider().setNullKeySerializer(NULL_KEY_SERIALIZER);
+    LOOSE_MAPPER_PRETTY.registerModule(module);
   }
 
   //
@@ -159,7 +212,7 @@ public class JsonUtils {
   //
 
   public static Object jsonToObject(String json) throws JsonProcessingException {
-    return strictMapper.readValue(json, Object.class);
+    return STRICT_MAPPER.readValue(json, Object.class);
   }
 
   //
@@ -171,44 +224,73 @@ public class JsonUtils {
   }
 
   public static String objectToJson(Object o, long maxJsonSize) throws IOException {
-    return objectToJson(o, false, maxJsonSize);
+    return objectToJson(o, false, false, maxJsonSize);
   }
 
   public static String objectToJson(Object o, boolean isStrict) throws IOException {
-    return objectToJson(o, isStrict, Long.MAX_VALUE);
+    return objectToJson(o, isStrict, false, Long.MAX_VALUE);
+  }
+
+  public static String objectToJson(Object o, boolean isStrict, boolean isPretty) throws IOException {
+    return objectToJson(o, isStrict, isPretty, Long.MAX_VALUE);
   }
 
   public static String objectToJson(Object o, boolean isStrict, long maxJsonSize) throws IOException {
+    return objectToJson(o, isStrict, false, maxJsonSize);
+  }
+
+  public static String objectToJson(Object o, boolean isStrict, boolean isPretty, long maxJsonSize) throws IOException {
     StringWriter writer = new StringWriter();
-    objectToJson(writer, o, isStrict, maxJsonSize);
+    objectToJson(writer, o, isStrict, isPretty, maxJsonSize);
     return writer.toString();
   }
 
   public static void objectToJson(Writer writer, Object o, boolean isStrict) throws IOException {
-    objectToJson(writer, o, isStrict, Long.MAX_VALUE);
+    objectToJson(writer, o, isStrict, false, Long.MAX_VALUE);
+  }
+
+  public static void objectToJson(Writer writer, Object o, boolean isStrict, boolean isPretty) throws IOException {
+    objectToJson(writer, o, isStrict, isPretty, Long.MAX_VALUE);
   }
 
   public static void objectToJson(Writer writer, Object o, boolean isStrict, long maxJsonSize) throws IOException {
+    objectToJson(writer, o, isStrict, false, maxJsonSize);
+  }
+
+  public static void objectToJson(Writer writer, Object o, boolean isStrict, boolean isPretty, long maxJsonSize) throws IOException {
     if (Long.MAX_VALUE != maxJsonSize) {
       writer = new BoundedWriter(writer, maxJsonSize);
     }
 
     try {
       if (isStrict) {
-        strictMapper.writeValue(writer, o);
+        if (isPretty) {
+          STRICT_MAPPER_PRETTY.writeValue(writer, o);
+        } else {
+          STRICT_MAPPER.writeValue(writer, o);
+        }
       } else {
-        looseMapper.writeValue(writer, o);
+        if (isPretty) {
+          LOOSE_MAPPER_PRETTY.writeValue(writer, o);
+        } else {
+          LOOSE_MAPPER.writeValue(writer, o);
+        }
       }
     } catch (BoundedWriter.WriterBoundReachedException wbre) {
       throw new IOException("Resulting JSON is too big.", wbre);
     }
   }
 
-  public static synchronized void addEncoder(JsonEncoder encoder) {
-    if (null == encoders) {
-      encoders = new ArrayList<JsonEncoder>();
+  /**
+   * Add a transformer to convert un-serializable objects to serializable ones or raw Strings included in the JSON.
+   *
+   * @param transformer The transformer instance.
+   */
+  public static synchronized void addTransformer(JsonTransformer transformer) {
+    if (null == transformers) {
+      transformers = new ArrayList<JsonTransformer>();
     }
-    encoders.add(encoder);
+    transformers.add(transformer);
   }
 
 }

@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 package io.warp10.continuum.egress;
 
+import io.warp10.CustomThreadFactory;
 import io.warp10.WarpConfig;
 import io.warp10.continuum.BootstrapManager;
 import io.warp10.continuum.Configuration;
@@ -42,6 +43,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Properties;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -160,8 +162,6 @@ public class EgressMobiusHandler extends WebSocketHandler.Simple implements Runn
       
       WarpScriptStack stack = new MemoryWarpScriptStack(null, null);           
 
-      boolean error = false;
-      
       try {
         //
         // Replace the context with the bootstrap one
@@ -310,7 +310,7 @@ public class EgressMobiusHandler extends WebSocketHandler.Simple implements Runn
     // Configure executor
     //
     
-    Executor executor = new ThreadPoolExecutor(poolsize, poolsize, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(1 + (poolsize >>> 1)));
+    Executor executor = new ThreadPoolExecutor(poolsize, poolsize, 60L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(1 + (poolsize >>> 1)), new CustomThreadFactory("Warp EgressMobiusHandler Thread"));
     
     while (true) {
       
@@ -391,6 +391,8 @@ public class EgressMobiusHandler extends WebSocketHandler.Simple implements Runn
           //
           
           WarpScriptStack stack = new MemoryWarpScriptStack(storeClient, directoryClient);
+          WarpConfig.setThreadProperty(WarpConfig.THREAD_PROPERTY_SESSION, UUID.randomUUID().toString());
+          
           stack.setAttribute(WarpScriptStack.ATTRIBUTE_NAME, "[EgressMobiusHandler " + Thread.currentThread().getName() + "]");
 
           boolean error = false;
@@ -416,6 +418,7 @@ public class EgressMobiusHandler extends WebSocketHandler.Simple implements Runn
             error = true;
             try { stack.push(e.getMessage()); } catch (WarpScriptException ee) {}
           } finally {
+            WarpConfig.clearThreadProperties();
             WarpScriptStackRegistry.unregister(stack);
           }
 

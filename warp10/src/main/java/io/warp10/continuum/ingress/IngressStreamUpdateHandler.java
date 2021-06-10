@@ -1,5 +1,5 @@
 //
-//   Copyright 2018-2020  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 package io.warp10.continuum.ingress;
 
 import io.warp10.ThrowableUtils;
+import io.warp10.WarpConfig;
 import io.warp10.WarpManager;
 import io.warp10.continuum.Configuration;
 import io.warp10.continuum.ThrottlingManager;
@@ -37,6 +38,7 @@ import java.io.StringReader;
 import java.math.BigInteger;
 import java.text.ParseException;
 import java.util.HashMap;
+import java.util.UUID;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -136,12 +138,12 @@ public class IngressStreamUpdateHandler extends WebSocketHandler.Simple {
             this.errormsg = false;
           }
           session.getRemote().sendString("OK " + (seqno++) + " ONERROR");
-        } else if ("DELTAON".equals(tokens[0])) {
+        } else if (null != tokens && "DELTAON".equals(tokens[0])) {
           if (!this.handler.ingress.allowDeltaAttributes) {
             throw new IOException("Delta update of attributes is disabled.");
           }
           this.deltaAttributes = true;
-        } else if ("DELTAOFF".equals(tokens[0])) {
+        } else if (null != tokens && "DELTAOFF".equals(tokens[0])) {
           this.deltaAttributes = false;
         } else {
           //
@@ -218,6 +220,8 @@ public class IngressStreamUpdateHandler extends WebSocketHandler.Simple {
           AtomicBoolean hadAttributes = this.handler.ingress.parseAttributes ? new AtomicBoolean(false) : null;
 
           try {
+            WarpConfig.setThreadProperty(WarpConfig.THREAD_PROPERTY_SESSION, UUID.randomUUID().toString());
+            
             GTSEncoder lastencoder = null;
             GTSEncoder encoder = null;
 
@@ -270,7 +274,7 @@ public class IngressStreamUpdateHandler extends WebSocketHandler.Simple {
                 }
               } catch (ParseException pe) {
                 Sensision.update(SensisionConstants.SENSISION_CLASS_CONTINUUM_STREAM_UPDATE_PARSEERRORS, sensisionLabels, 1);
-                throw new IOException("Parse error at '" + line + "'", pe);
+                throw new IOException("Parse error at index " + pe.getErrorOffset() + " in '" + line + "'", pe);
               }
 
               //
@@ -404,6 +408,8 @@ public class IngressStreamUpdateHandler extends WebSocketHandler.Simple {
               }
             }                  
           } finally {
+            WarpConfig.clearThreadProperties();
+            
             this.handler.ingress.pushMetadataMessage(null);
             this.handler.ingress.pushDataMessage(null, this.kafkaDataMessageAttributes);
             
@@ -423,7 +429,7 @@ public class IngressStreamUpdateHandler extends WebSocketHandler.Simple {
           String msg = "ERROR " + ThrowableUtils.getErrorMessage(t);
           session.getRemote().sendString(msg);
         } else {
-          throw t;
+          session.close(HttpServletResponse.SC_BAD_REQUEST, ThrowableUtils.getErrorMessage(t));
         }
       }      
     }

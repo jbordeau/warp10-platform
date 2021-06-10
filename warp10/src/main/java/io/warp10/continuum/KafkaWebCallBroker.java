@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 package io.warp10.continuum;
 
 import io.warp10.continuum.sensision.SensisionConstants;
-import io.warp10.continuum.store.Directory;
 import io.warp10.crypto.CryptoUtils;
 import io.warp10.crypto.KeyStore;
 import io.warp10.script.thrift.data.WebCallRequest;
@@ -111,6 +110,8 @@ public class KafkaWebCallBroker extends Thread {
     //
 
     KafkaWebCallService.initKeys(keystore, properties);
+
+    keystore.forget();
     
     final KafkaWebCallBroker self = this;
     
@@ -400,8 +401,8 @@ public class KafkaWebCallBroker extends Thread {
           }          
         }        
       } catch (Throwable t) {
-        // FIXME(hbs): log something/update Sensision metrics
-        t.printStackTrace(System.out);
+        LOG.warn("WebCall Broker failed.", t);
+        // FIXME(hbs): update Sensision metrics
       } finally {
         // Set abort to true in case we exit the 'run' method
         broker.abort.set(true);

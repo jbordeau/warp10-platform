@@ -1,5 +1,5 @@
 //
-//   Copyright 2019  SenX S.A.S.
+//   Copyright 2019-2020  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -53,6 +53,12 @@ ingress.websocket.maxmessagesize = 1048576
 #ingress.activity.meta = true
 
 //
+// Maximum value size of a measurement
+// Make sure this is less than 'max.encoder.size'
+//
+#standalone.value.maxsize = 65536
+
+//
 // Default maximum age of datapoints pushed to Warp 10, in ms. Any timestamp older than
 // 'now' - this value will be rejected.
 // The maxpast value from the token will have precedence over this one
@@ -100,4 +106,4 @@ ingress.websocket.maxmessagesize = 1048576
 // Set to true to allow /delete queries to select GTS based on their last activity.
 // This must be explicitely configured to avoid deleting extraneous series when activity tracking is not enabled
 //
-#ingress.delete.activity.support = true                                                                                                                                                                                                                                                
+#ingress.delete.activity.support = true

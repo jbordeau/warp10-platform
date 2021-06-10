@@ -1,5 +1,5 @@
 //
-//   Copyright 2018  SenX S.A.S.
+//   Copyright 2018-2021  SenX S.A.S.
 //
 //   Licensed under the Apache License, Version 2.0 (the "License");
 //   you may not use this file except in compliance with the License.
@@ -15,9 +15,12 @@
 //
 package io.warp10.plugins.tcp;
 
+import io.warp10.CustomThreadFactory;
 import io.warp10.script.MemoryWarpScriptStack;
 import io.warp10.script.WarpScriptStack.Macro;
 import io.warp10.script.WarpScriptStopException;
+import io.warp10.warp.sdk.AbstractWarp10Plugin;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -117,13 +120,12 @@ public class TCPManager extends Thread {
     in.close();
 
     warpscript = new String(baos.toByteArray(), StandardCharsets.UTF_8);
-    stack = new MemoryWarpScriptStack(null, null, new Properties());
+    stack = new MemoryWarpScriptStack(AbstractWarp10Plugin.getExposedStoreClient(), AbstractWarp10Plugin.getExposedDirectoryClient(), new Properties());
     stack.maxLimits();
 
     try {
       stack.execMulti(warpscript);
     } catch (Throwable t) {
-      t.printStackTrace();
       LOG.error("Caught exception while loading '" + p.getFileName() + "'.", t);
     }
 
@@ -175,7 +177,7 @@ public class TCPManager extends Thread {
 
     done = false;
 
-    clientsExecutor = new ThreadPoolExecutor(maxConnections, maxConnections, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(maxConnections), new NamedThreadFactory("Warp TCP Client for port " + port));
+    clientsExecutor = new ThreadPoolExecutor(maxConnections, maxConnections, 30000L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(maxConnections), new CustomThreadFactory("Warp TCP Client for port " + port));
     clientsExecutor.allowCoreThreadTimeOut(true);
 
     setDaemon(true);
@@ -189,7 +191,7 @@ public class TCPManager extends Thread {
 
     for (int i = 0; i < parallelism; i++) {
 
-      final MemoryWarpScriptStack stack = new MemoryWarpScriptStack(null, null, new Properties());
+      final MemoryWarpScriptStack stack = new MemoryWarpScriptStack(AbstractWarp10Plugin.getExposedStoreClient(), AbstractWarp10Plugin.getExposedDirectoryClient(), new Properties());
       stack.maxLimits();
 
       final LinkedBlockingQueue<List<Object>> queue = queues[Math.min(i, queues.length - 1)];
@@ -227,7 +229,7 @@ public class TCPManager extends Thread {
               return;
             } catch (WarpScriptStopException wsse) {
             } catch (Exception e) {
-              e.printStackTrace();
+              LOG.error("Error while executing TCP macro.", e);
             }
           }
         }
